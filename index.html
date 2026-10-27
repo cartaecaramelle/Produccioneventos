@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Producción de Eventos</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#14594a">
+<link rel="icon" href="icon-192.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+:root{--ink:#1c2b27;--paper:#f5f6f3;--line:#dcdfd8;--brand:#14594a;--mute:#64706b}
+body{font-family:Figtree,system-ui,sans-serif;background:var(--paper);color:var(--ink)}
+h1,h2,h3{font-family:'Bricolage Grotesque',Figtree,sans-serif;letter-spacing:-.01em}
+.muted{color:var(--mute)}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:1rem}
+.inp{width:100%;border:1px solid var(--line);border-radius:8px;padding:.55rem .7rem;background:#fff;margin-top:.25rem;font-size:.95rem}
+.inp:focus,.btn:focus-visible,.btn2:focus-visible,button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.lbl{display:block;font-size:.85rem;font-weight:500;margin-top:.7rem}
+.btn{background:var(--brand);color:#fff;border-radius:8px;padding:.5rem .95rem;font-weight:600;font-size:.92rem}
+.btn:hover{background:#0e4439}
+.btn2{border:1px solid var(--line);background:#fff;border-radius:8px;padding:.45rem .8rem;font-size:.88rem}
+.btn2:hover{background:#eef0ec}.danger{color:#a32b2b}
+.tab{padding:.7rem 1rem;font-weight:500;border-bottom:3px solid transparent;color:var(--mute);white-space:nowrap}
+.tab.on{color:var(--ink);border-color:var(--brand);font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{padding:.4rem .7rem;font-size:.82rem;background:#fff;border-right:1px solid var(--line)}
+.seg button:last-child{border:0}
+.seg .on.s0{background:#fde9b8}.seg .on.s1{background:#cfe4f7}.seg .on.s2{background:#c9ebd6;font-weight:600}
+table{width:100%;font-size:.9rem;border-collapse:collapse}
+td,th{padding:.3rem .4rem;border-top:1px solid var(--line);text-align:left}
+th{font-weight:500;color:var(--mute);border:0}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+dialog{border:0;border-radius:12px;padding:0;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+dialog::backdrop{background:rgba(20,30,27,.45)}
+details>summary{cursor:pointer;list-style:none}
+@media (prefers-reduced-motion:no-preference){.fade{animation:f .25s ease-out}@keyframes f{from{opacity:0}}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 bg-[#1c2b27] text-white text-sm px-4 py-2 rounded-lg hidden z-50"></div>
+
+<script>
+/* ============ CONFIGURACIÓN (rellena estas dos constantes) ============ */
+const SUPABASE_URL      = 'NEXT_PUBLIC_SUPABASE_URL=https://ouoxrfkrmgiuhvqtmpvj.supabase.co';   // ej: https://xxxx.supabase.co
+const SUPABASE_ANON_KEY = 'sb_publishable_TsP-mB2ZtOhYrcQ11wj_iA_QG-YQN2x';   // clave "anon public" de Project Settings > API
+
+/* ============ NÚCLEO ============ */
+const USERS   = { admin: 'admin@produccion.local', cocina: 'cocina@produccion.local' };
+const ESTADOS = ['Pendiente', 'En Cocina', 'Listo para Enviar'];
+const CATS    = ['Aderezo', 'Ensalada', 'Salsa', 'Base', 'Postre', 'Otra'];
+const CONFIG_OK = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+const sb = supabase.createClient(SUPABASE_URL || 'https://placeholder.supabase.co', SUPABASE_ANON_KEY || 'placeholder');
+const S = { rol: null, tab: 'produccion', ev: null, eventos: [], recetas: [], hojas: [], q: '' };
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = n => Number(n).toLocaleString('es-ES', { maximumFractionDigits: 1 });
+const isAdmin = () => S.rol === 'admin';
+const curEv = () => S.eventos.find(e => e.id === S.ev);
+const ok = r => { if (r.error) throw new Error(r.error.message); return r.data; };
+const save = async (t, id, row) => ok(await (id ? sb.from(t).update(row).eq('id', id) : sb.from(t).insert(row)));
+const toast = m => { const t = $('#toast'); t.textContent = m; t.classList.remove('hidden'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.add('hidden'), 3500); };
+const parseL = t => (t || '').split('\n').map(l => l.split('|').map(x => x.trim())).filter(a => a[0]);
+const fmtDate = d => new Date(d + 'T00:00').toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+
+/* Login: "admin"/"cocina" -> correo dummy interno */
+async function login(user, pass) {
+  const email = USERS[user.trim().toLowerCase()];
+  if (!email) throw new Error('Usuario no válido.');
+  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if (error) throw new Error('Usuario o contraseña incorrectos.');
+}
+const rolDe = email => email === USERS.admin ? 'admin' : email === USERS.cocina ? 'cocina' : null;
+
+sb.auth.onAuthStateChange((_e, ses) => {
+  S.rol = ses ? rolDe(ses.user.email) : null;
+  setTimeout(() => S.rol ? load() : render(), 0);
+});
+
+async function load() {
+  try {
+    const [a, b, c] = await Promise.all([
+      sb.from('eventos').select('*').order('fecha'),
+      sb.from('recetas').select('*').order('nombre'),
+      sb.from('hojas_produccion').select('*').order('orden')]);
+    S.eventos = ok(a); S.recetas = ok(b); S.hojas = ok(c);
+    if (!curEv()) {
+      const hoy = new Date().toISOString().slice(0, 10);
+      S.ev = (S.eventos.find(e => e.fecha >= hoy) || S.eventos[S.eventos.length - 1] || {}).id || null;
+    }
+  } catch (e) { toast(e.message); }
+  render();
+}
+
+/* ============ VISTAS ============ */
+function loginView() {
+  return `<div class="min-h-screen grid place-items-center p-4"><form id="lf" class="card w-full max-w-sm fade">
+    <h1 class="text-2xl font-bold">Producción de eventos</h1>
+    <p class="muted text-sm mt-1">Entra con tu usuario de cocina o de administración.</p>
+    ${CONFIG_OK ? '' : '<p class="mt-3 text-sm bg-amber-50 border border-amber-200 rounded-lg p-2">Falta configurar SUPABASE_URL y SUPABASE_ANON_KEY al inicio del archivo.</p>'}
+    <label class="lbl">Usuario<input name="u" class="inp" autocomplete="username" autocapitalize="none" required></label>
+    <label class="lbl">Contraseña<input name="p" type="password" class="inp" autocomplete="current-password" required></label>
+    <p id="le" class="text-sm danger mt-2 min-h-[1.2rem]"></p>
+    <button class="btn w-full mt-2">Entrar</button></form></div>`;
+}
+
+function shell() {
+  const tabs = [['produccion', 'Producción'], ['eventos', 'Eventos'], ['recetas', 'Recetas']];
+  return `<header class="bg-white border-b" style="border-color:var(--line)">
+    <div class="max-w-5xl mx-auto px-4 pt-3 flex items-center justify-between">
+      <h1 class="text-lg font-bold">Producción de eventos</h1>
+      <div class="flex items-center gap-3 text-sm"><span class="muted">${isAdmin() ? 'Administración' : 'Cocina'}</span>
+      <button class="btn2" data-a="logout">Salir</button></div></div>
+    <nav class="max-w-5xl mx-auto px-2 flex overflow-x-auto">${tabs.map(([k, l]) =>
+      `<button class="tab ${S.tab === k ? 'on' : ''}" data-a="tab" data-id="${k}">${l}</button>`).join('')}</nav></header>
+    <main class="max-w-5xl mx-auto p-4 fade">${VIEWS[S.tab]()}</main>`;
+}
+
+const evPicker = () => `<label class="block text-sm font-medium">Evento
+  <select data-c="ev" class="inp sm:max-w-md">${S.eventos.length ? S.eventos.map(e =>
+    `<option value="${e.id}" ${e.id === S.ev ? 'selected' : ''}>${esc(fmtDate(e.fecha))} · ${esc(e.nombre)}</option>`).join('')
+    : '<option>Sin eventos</option>'}</select></label>`;
+
+function hojaCard(h, pax) {
+  return `<article class="card"><div class="flex flex-wrap items-start justify-between gap-3">
+    <div><h3 class="text-lg font-semibold">${esc(h.plato)}</h3>${h.notas ? `<p class="text-sm muted">${esc(h.notas)}</p>` : ''}</div>
+    <div class="seg">${ESTADOS.map((s, i) => `<button data-a="estado" data-id="${h.id}" data-v="${s}" class="${h.estado === s ? 'on s' + i : ''}">${s}</button>`).join('')}</div></div>
+    ${(h.items || []).length ? `<div class="overflow-x-auto mt-2"><table><tr><th>Ingrediente</th><th class="n">Por PAX</th><th class="n">Total (${pax} PAX)</th></tr>
+    ${h.items.map(i => `<tr><td>${esc(i.n)}</td><td class="n">${i.g ? num(i.g) + ' g' : ''}${i.u ? num(i.u) + ' ud' : ''}</td>
+      <td class="n">${i.g ? num(i.g * pax) + ' g' : ''}${i.u ? num(i.u * pax) + ' ud' : ''}</td></tr>`).join('')}</table></div>` : ''}
+    ${isAdmin() ? `<div class="flex gap-2 mt-3"><button class="btn2" data-a="editPlato" data-id="${h.id}">Editar</button>
+      <button class="btn2 danger" data-a="delPlato" data-id="${h.id}">Eliminar</button></div>` : ''}</article>`;
+}
+
+const VIEWS = {
+  produccion() {
+    const ev = curEv(), hs = S.hojas.filter(h => h.evento_id === S.ev);
+    const listos = hs.filter(h => h.estado === ESTADOS[2]).length, pct = hs.length ? Math.round(listos / hs.length * 100) : 0;
+    return `<div class="flex flex-wrap items-end justify-between gap-3">${evPicker()}
+      ${isAdmin() && ev ? '<button class="btn" data-a="newPlato">Añadir plato</button>' : ''}</div>
+      ${ev ? `<div class="card mt-4"><div class="flex justify-between text-sm"><span><b>${ev.pax}</b> PAX${ev.menu ? ' · ' + esc(ev.menu) : ''}</span>
+        <span>${listos} de ${hs.length} listos</span></div>
+        <div class="h-2 rounded bg-[#e6e9e3] mt-2 overflow-hidden"><div class="h-2 bg-[#14594a]" style="width:${pct}%"></div></div></div>
+      <div class="grid gap-3 mt-4">${hs.map(h => hojaCard(h, ev.pax)).join('') || '<p class="muted">Este evento aún no tiene platos en su hoja de producción.</p>'}</div>`
+      : '<p class="muted mt-6">Todavía no hay eventos. El administrador debe crear el primero en la pestaña Eventos.</p>'}`;
+  },
+  eventos() {
+    return `${isAdmin() ? '<div class="flex justify-end"><button class="btn" data-a="newEv">Nuevo evento</button></div>' : ''}
+    <div class="grid gap-3 mt-3 sm:grid-cols-2">${S.eventos.map(e => `<article class="card">
+      <h3 class="font-semibold text-lg">${esc(e.nombre)}</h3><p class="text-sm muted">${esc(fmtDate(e.fecha))} · ${e.pax} PAX</p>
+      ${e.menu ? `<p class="text-sm mt-1">${esc(e.menu)}</p>` : ''}${e.notas ? `<p class="text-sm muted mt-1">${esc(e.notas)}</p>` : ''}
+      <div class="flex gap-2 mt-3"><button class="btn2" data-a="abrirEv" data-id="${e.id}">Ver hoja</button>
+      ${isAdmin() ? `<button class="btn2" data-a="editEv" data-id="${e.id}">Editar</button><button class="btn2 danger" data-a="delEv" data-id="${e.id}">Eliminar</button>` : ''}</div>
+    </article>`).join('') || '<p class="muted">No hay eventos creados.</p>'}</div>`;
+  },
+  recetas() {
+    return `<div class="flex flex-wrap gap-3 items-center justify-between">
+      <input id="q" class="inp sm:max-w-sm" style="margin:0" placeholder="Buscar receta o ingrediente" value="${esc(S.q)}">
+      ${isAdmin() ? '<button class="btn" data-a="newRec">Nueva receta</button>' : ''}</div>
+      <div id="rl" class="grid gap-3 mt-4">${recList()}</div>`;
+  }
+};
+
+function recList() {
+  const q = S.q.toLowerCase();
+  const rs = S.recetas.filter(r => !q || r.nombre.toLowerCase().includes(q) || (r.ingredientes || []).some(i => i.n.toLowerCase().includes(q)));
+  return rs.map(r => { const tot = (r.ingredientes || []).reduce((a, i) => a + (+i.g || 0), 0);
+    return `<details class="card"><summary class="flex justify-between gap-3"><span><b>${esc(r.nombre)}</b>
+      <span class="muted text-sm"> · ${esc(r.categoria)}</span></span>
+      <span class="muted text-sm">${r.rendimiento_g ? num(r.rendimiento_g) + ' g' : ''}${r.porciones ? ' · ' + num(r.porciones) + ' porc.' : ''}</span></summary>
+      <table class="mt-2"><tr><th>Ingrediente</th><th class="n">Gramos</th><th class="n">%</th></tr>
+      ${(r.ingredientes || []).map(i => `<tr><td>${esc(i.n)}</td><td class="n">${num(i.g)}</td><td class="n">${tot ? num(i.g / tot * 100) : ''}</td></tr>`).join('')}</table>
+      ${r.instrucciones ? `<p class="text-sm mt-3 whitespace-pre-line">${esc(r.instrucciones)}</p>` : ''}
+      ${isAdmin() ? `<div class="flex gap-2 mt-3"><button class="btn2" data-a="editRec" data-id="${r.id}">Editar</button><button class="btn2 danger" data-a="delRec" data-id="${r.id}">Eliminar</button></div>` : ''}</details>`;
+  }).join('') || '<p class="muted">No se encontraron recetas.</p>';
+}
+
+function render() {
+  $('#app').innerHTML = S.rol ? shell() : loginView();
+  const lf = $('#lf');
+  if (lf) lf.onsubmit = async e => { e.preventDefault(); const f = new FormData(lf);
+    try { await login(f.get('u'), f.get('p')); } catch (err) { $('#le').textContent = err.message; } };
+}
+
+/* ============ FORMULARIOS (modal genérico) ============ */
+function openForm(title, fields, onSave) {
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form class="p-5 w-[min(560px,92vw)]"><h3 class="text-xl font-semibold">${title}</h3>${fields.map(f => `<label class="lbl">${f.l}${
+    f.t === 'area' ? `<textarea name="${f.k}" rows="${f.r || 4}" class="inp" placeholder="${esc(f.p || '')}">${esc(f.v)}</textarea>`
+    : f.t === 'select' ? `<select name="${f.k}" class="inp">${f.o.map(o => `<option value="${esc(o[0])}" ${o[0] === f.v ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
+    : `<input name="${f.k}" type="${f.t || 'text'}" value="${esc(f.v)}" class="inp" ${f.req ? 'required' : ''}>`}</label>`).join('')}
+    <div class="flex justify-end gap-2 mt-5"><button type="button" class="btn2" data-x>Cancelar</button><button class="btn">Guardar</button></div></form>`;
+  document.body.appendChild(d); d.showModal();
+  const close = () => { d.close(); d.remove(); };
+  d.querySelector('[data-x]').onclick = close;
+  d.querySelector('form').onsubmit = async e => { e.preventDefault();
+    try { await onSave(Object.fromEntries(new FormData(e.target))); close(); await load(); toast('Guardado'); } catch (err) { toast(err.message); } };
+}
+const byId = (arr, id) => arr.find(x => x.id === id) || {};
+
+/* ============ ACCIONES ============ */
+const A = {
+  tab: id => { S.tab = id; render(); },
+  logout: () => sb.auth.signOut(),
+  abrirEv: id => { S.ev = id; S.tab = 'produccion'; render(); },
+  async estado(id, b) {
+    const v = b.dataset.v;
+    const r = await sb.from('hojas_produccion').update({ estado: v }).eq('id', id).select();
+    if (r.error || !r.data.length) throw new Error(r.error?.message || 'No tienes permiso para cambiar el estado.');
+    byId(S.hojas, id).estado = v; render();
+  },
+  /* Eventos */
+  newEv: () => A.formEv({}),
+  editEv: id => A.formEv(byId(S.eventos, id)),
+  formEv: e => openForm(e.id ? 'Editar evento' : 'Nuevo evento', [
+    { k: 'nombre', l: 'Nombre', v: e.nombre, req: 1 }, { k: 'fecha', l: 'Fecha', t: 'date', v: e.fecha, req: 1 },
+    { k: 'pax', l: 'PAX', t: 'number', v: e.pax ?? 0, req: 1 }, { k: 'menu', l: 'Menú (ej: Finger Opción II)', v: e.menu },
+    { k: 'notas', l: 'Notas', t: 'area', v: e.notas, r: 3 }],
+    d => save('eventos', e.id, { nombre: d.nombre, fecha: d.fecha, pax: +d.pax, menu: d.menu, notas: d.notas })),
+  async delEv(id) { if (confirm('¿Eliminar el evento y toda su hoja de producción?')) { ok(await sb.from('eventos').delete().eq('id', id)); await load(); } },
+  /* Recetas */
+  newRec: () => A.formRec({}),
+  editRec: id => A.formRec(byId(S.recetas, id)),
+  formRec: r => openForm(r.id ? 'Editar receta' : 'Nueva receta', [
+    { k: 'nombre', l: 'Nombre del producto', v: r.nombre, req: 1 },
+    { k: 'categoria', l: 'Categoría', t: 'select', v: r.categoria || 'Otra', o: CATS.map(c => [c, c]) },
+    { k: 'rendimiento_g', l: 'Rendimiento total (g)', t: 'number', v: r.rendimiento_g },
+    { k: 'porciones', l: 'Porciones', t: 'number', v: r.porciones },
+    { k: 'ingredientes', l: 'Ingredientes (uno por línea: nombre | gramos)', t: 'area', r: 6, v: (r.ingredientes || []).map(i => `${i.n} | ${i.g}`).join('\n'), p: 'Mayonesa | 300' },
+    { k: 'instrucciones', l: 'Elaboración / notas', t: 'area', v: r.instrucciones }],
+    d => save('recetas', r.id, { nombre: d.nombre, categoria: d.categoria, rendimiento_g: +d.rendimiento_g || null, porciones: +d.porciones || null,
+      ingredientes: parseL(d.ingredientes).map(a => ({ n: a[0], g: +String(a[1]).replace(',', '.') || 0 })), instrucciones: d.instrucciones })),
+  async delRec(id) { if (confirm('¿Eliminar esta receta?')) { ok(await sb.from('recetas').delete().eq('id', id)); await load(); } },
+  /* Platos de la hoja de producción */
+  newPlato: () => A.formPlato({}),
+  editPlato: id => A.formPlato(byId(S.hojas, id)),
+  formPlato: h => openForm(h.id ? 'Editar plato' : 'Añadir plato', [
+    { k: 'plato', l: 'Plato', v: h.plato, req: 1 },
+    { k: 'receta_id', l: 'Receta vinculada (opcional)', t: 'select', v: h.receta_id || '', o: [['', '— ninguna —'], ...S.recetas.map(r => [r.id, r.nombre])] },
+    { k: 'items', l: 'Ingredientes por PAX (nombre | gramos | unidades)', t: 'area', r: 6, p: 'Dados de pollo crudo | 40 |\nMini chapata | | 1',
+      v: (h.items || []).map(i => `${i.n} | ${i.g ?? ''} | ${i.u ?? ''}`).join('\n') },
+    { k: 'orden', l: 'Orden', t: 'number', v: h.orden ?? S.hojas.filter(x => x.evento_id === S.ev).length },
+    { k: 'notas', l: 'Notas', v: h.notas }],
+    d => save('hojas_produccion', h.id, { evento_id: h.evento_id || S.ev, plato: d.plato, receta_id: d.receta_id || null, orden: +d.orden || 0, notas: d.notas,
+      items: parseL(d.items).map(a => ({ n: a[0], g: +String(a[1] || '').replace(',', '.') || null, u: +String(a[2] || '').replace(',', '.') || null })) })),
+  async delPlato(id) { if (confirm('¿Eliminar este plato de la hoja?')) { ok(await sb.from('hojas_produccion').delete().eq('id', id)); await load(); } }
+};
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  try { await A[b.dataset.a]?.(b.dataset.id, b); } catch (err) { toast(err.message); }
+});
+document.addEventListener('change', async e => {
+  if (e.target.dataset.c === 'ev') { S.ev = e.target.value; render(); }
+});
+document.addEventListener('input', e => { if (e.target.id === 'q') { S.q = e.target.value; $('#rl').innerHTML = recList(); } });
+
+render();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
